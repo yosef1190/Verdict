@@ -27,11 +27,12 @@ function requireDb(): Firestore {
   return db
 }
 
-onAuthStateChanged(requireAuth(), async (user) => {
+onAuthStateChanged(requireAuth(), (user) => {
   currentUser.value = user
   if (!authReady.value) {
     authReady.value = true
-    if (user) await ensureUserDoc(user)
+    // Sync the profile doc in the background; don't gate app startup on it.
+    if (user) void syncUserProfile(user)
   }
 })
 
@@ -58,6 +59,22 @@ async function ensureUserDoc(user: User): Promise<void> {
   }
 }
 
+/**
+ * Kick off profile sync in the background — never block navigation on it.
+ * The in-flight promise is cached so repeated calls within one session
+ * (login + onAuthStateChanged, etc.) don't duplicate Firestore reads/writes.
+ */
+const profileSyncCache = new Map<string, Promise<void>>()
+
+function syncUserProfile(user: User): Promise<void> {
+  let inFlight = profileSyncCache.get(user.uid)
+  if (!inFlight) {
+    inFlight = ensureUserDoc(user).finally(() => profileSyncCache.delete(user.uid))
+    profileSyncCache.set(user.uid, inFlight)
+  }
+  return inFlight
+}
+
 /** Register with email + password and trigger the verification email. */
 export async function registerWithEmail(email: string, password: string, name: string) {
   const cred = await createUserWithEmailAndPassword(requireAuth(), email.trim(), password)
@@ -66,21 +83,22 @@ export async function registerWithEmail(email: string, password: string, name: s
     currentUser.value = auth?.currentUser ?? cred.user
   }
   await sendEmailVerification(cred.user)
-  await ensureUserDoc(cred.user)
+  // Profile doc creation happens in the background.
+  void syncUserProfile(cred.user)
   return cred.user
 }
 
-/** Email + password sign-in. */
+/** Email + password sign-in. Profile sync runs in the background. */
 export async function loginWithEmail(email: string, password: string) {
   const cred = await signInWithEmailAndPassword(requireAuth(), email.trim(), password)
-  await ensureUserDoc(cred.user)
+  void syncUserProfile(cred.user)
   return cred.user
 }
 
 /** Google OAuth via popup. Google accounts are treated as verified. */
 export async function loginWithGoogle() {
   const cred = await signInWithPopup(requireAuth(), googleProvider)
-  await ensureUserDoc(cred.user)
+  void syncUserProfile(cred.user)
   return cred.user
 }
 
